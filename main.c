@@ -1,5 +1,11 @@
 #include <aws/nitro_enclaves/kms.h>
 #include <aws/nitro_enclaves/nitro_enclaves.h>
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/bio.h>
+#include <openssl/x509.h>
 
 #include <aws/common/command_line_parser.h>
 #include <aws/common/encoding.h>
@@ -14,9 +20,9 @@
 #include <unistd.h>
 
 #define SERVICE_PORT 3000
-#define PROXY_PORT 8000
+#define PROXY_PORT 7000
 #define BUF_SIZE 8192
-AWS_STATIC_STRING_FROM_LITERAL(default_region, "us-east-1");
+AWS_STATIC_STRING_FROM_LITERAL(default_region, "us-west-2");
 
 enum status {
     STATUS_OK,
@@ -337,8 +343,81 @@ static void handle_connection(struct app_ctx *app_ctx, int peer_fd) {
             fail_on(rc != AWS_OP_SUCCESS, decrypt_clean_err, "Base64 encoding error");
             aws_byte_buf_append_null_terminator(&ciphertext_decrypted_b64);
 
+          
+
+            RSA				*r = NULL;
+            BIGNUM			*bne = NULL;
+            int				bits = 2048;
+            unsigned long	e = RSA_F4;
+
+            // generate rsa key
+            bne = BN_new();
+            BN_set_word(bne,e);
+
+            r = RSA_new();
+            RSA_generate_key_ex(r, bits, bne, NULL);
+
+            char   *pri_key = NULL;           // Private key
+            char   *pub_key = NULL;           // Public key
+            size_t pri_len;            // Length of private key
+            size_t pub_len;            // Length of public key
+
+            BIO *pri = BIO_new(BIO_s_mem());
+            BIO *pub = BIO_new(BIO_s_mem());
+
+            PEM_write_bio_RSAPrivateKey(pri, r, NULL, NULL, 0, NULL, NULL);
+            PEM_write_bio_RSAPublicKey(pub, r);
+
+            pri_len = BIO_pending(pri);
+            pub_len = BIO_pending(pub);
+
+            pri_key = (char*)malloc(pri_len + 1);
+            pub_key = (char*)malloc(pub_len + 1);
+
+            BIO_read(pri, pri_key, pri_len);
+            BIO_read(pub, pub_key, pub_len);
+
+            pri_key[pri_len] = '\0';
+            pub_key[pub_len] = '\0';
+
+
+
+
+            //const char s2[10] = "Hello :)";
+            const size_t len1 = strlen((const char *)ciphertext_decrypted.buffer);
+            const size_t len2 = strlen((const char *)pub_key);
+            char *result = malloc(len1 + len2 + 1); // +1 for the null-terminator
+            // in real code you would check for errors in malloc here
+            memcpy(result, ciphertext_decrypted.buffer, len1);
+            memcpy(result + len1, pub_key, len2 + 1); // +1 to copy the null-terminator
+
+            BIO_free_all(pub);
+            BIO_free_all(pri);
+            RSA_free(r);
+            BN_free(bne);
+            free(pri_key);
+            free(pub_key);
+          
+            struct aws_byte_buf test_str = aws_byte_buf_from_c_str((const char *)result);
+          
+            size_t test_str_b64_len;
+            struct aws_byte_buf test_str_b64;
+            struct aws_byte_cursor test_str_cursor = aws_byte_cursor_from_buf(&test_str);     
+            aws_base64_compute_encoded_len(test_str.len, &test_str_b64_len);
+            rc = aws_byte_buf_init(&test_str_b64, app_ctx->allocator, test_str_b64_len + 1);
+            fail_on(rc != AWS_OP_SUCCESS, decrypt_clean_err, "Memory allocation error");
+            rc = aws_base64_encode(&test_str_cursor, &test_str_b64);
+            fail_on(rc != AWS_OP_SUCCESS, decrypt_clean_err, "Base64 encoding error");
+            aws_byte_buf_append_null_terminator(&test_str_b64);          
+          
+          
+
             /* Send back result. */
-            rc = s_send_status(peer_fd, STATUS_OK, (const char *)ciphertext_decrypted_b64.buffer);
+            //rc = s_send_status(peer_fd, STATUS_OK, (const char *)ciphertext_decrypted_b64.buffer);
+            rc = s_send_status(peer_fd, STATUS_OK, (const char *)test_str_b64.buffer);
+            free(result);
+            aws_byte_buf_clean_up(&test_str_b64);
+          
             aws_byte_buf_clean_up(&ciphertext_decrypted);
             aws_byte_buf_clean_up(&ciphertext_decrypted_b64);
             break_on(rc <= 0);
